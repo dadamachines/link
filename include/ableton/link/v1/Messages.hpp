@@ -91,6 +91,8 @@ It encodeMessage(const MessageType messageType, const Payload& payload, It out)
       toNetworkByteStream(
         header, copy(begin(kProtocolHeader), end(kProtocolHeader), std::move(out))));
   }
+  // Nothing is encoded when the message would not fit; upstream throws here.
+  return out;
 }
 
 } // namespace detail

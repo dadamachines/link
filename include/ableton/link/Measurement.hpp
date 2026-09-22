@@ -145,13 +145,21 @@ struct Measurement
         std::chrono::microseconds prevHostTime{0};
 
 
-        discovery::parsePayload<SessionMembership, GHostTime, PrevGHostTime, HostTime>(
-          payloadBegin,
-          messageEnd,
-          [&sessionId](const SessionMembership& sms) { sessionId = sms.sessionId; },
-          [&ghostTime](GHostTime gt) { ghostTime = std::move(gt.time); },
-          [&prevGHostTime](PrevGHostTime gt) { prevGHostTime = std::move(gt.time); },
-          [&prevHostTime](HostTime ht) { prevHostTime = std::move(ht.time); });
+        const auto wellFormed =
+          discovery::parsePayload<SessionMembership, GHostTime, PrevGHostTime,
+            HostTime>(payloadBegin,
+            messageEnd,
+            [&sessionId](const SessionMembership& sms) { sessionId = sms.sessionId; },
+            [&ghostTime](GHostTime gt) { ghostTime = std::move(gt.time); },
+            [&prevGHostTime](PrevGHostTime gt) { prevGHostTime = std::move(gt.time); },
+            [&prevHostTime](HostTime ht) { prevHostTime = std::move(ht.time); });
+
+        // A malformed pong would measure the session against zeroed times.
+        if (!wellFormed)
+        {
+          listen();
+          return;
+        }
 
         if (mSessionId == sessionId)
         {

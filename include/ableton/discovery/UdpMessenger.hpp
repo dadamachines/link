@@ -308,8 +308,17 @@ private:
                           It payloadEnd)
     {
 
-      auto state = NodeState::fromPayload(
-        std::move(header.ident), std::move(payloadBegin), std::move(payloadEnd));
+      bool wellFormed = false;
+      auto state = NodeState::fromPayload(std::move(header.ident),
+        std::move(payloadBegin), std::move(payloadEnd), &wellFormed);
+
+      // A malformed payload leaves default entries behind -- a zero tempo and
+      // an empty session id would enter the session as a peer state. Upstream
+      // drops the message by letting the parse throw past this point.
+      if (!wellFormed)
+      {
+        return;
+      }
 
       // Handlers must only be called once
       auto handler = std::move(mPeerStateHandler);

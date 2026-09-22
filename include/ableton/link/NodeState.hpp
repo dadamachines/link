@@ -49,19 +49,27 @@ struct NodeState
       state.timeline, SessionMembership{state.sessionId}, state.startStopState);
   }
 
+  // pWellFormed, when given, reports whether the payload parsed at all; a
+  // malformed one leaves default entries behind, which a caller must not use.
   template <typename It>
-  static NodeState fromPayload(NodeId nodeId, It begin, It end)
+  static NodeState fromPayload(
+    NodeId nodeId, It begin, It end, bool* pWellFormed = nullptr)
   {
     using namespace std;
     auto nodeState = NodeState{std::move(nodeId), {}, {}, {}};
-    discovery::parsePayload<Timeline, SessionMembership, StartStopState>(
-      std::move(begin),
-      std::move(end),
-      [&nodeState](Timeline tl) { nodeState.timeline = std::move(tl); },
-      [&nodeState](SessionMembership membership)
-      { nodeState.sessionId = std::move(membership.sessionId); },
-      [&nodeState](StartStopState ststst)
-      { nodeState.startStopState = std::move(ststst); });
+    const auto wellFormed =
+      discovery::parsePayload<Timeline, SessionMembership, StartStopState>(
+        std::move(begin),
+        std::move(end),
+        [&nodeState](Timeline tl) { nodeState.timeline = std::move(tl); },
+        [&nodeState](SessionMembership membership)
+        { nodeState.sessionId = std::move(membership.sessionId); },
+        [&nodeState](StartStopState ststst)
+        { nodeState.startStopState = std::move(ststst); });
+    if (pWellFormed != nullptr)
+    {
+      *pWellFormed = wellFormed;
+    }
     return nodeState;
   }
 

@@ -21,7 +21,6 @@
 
 #include <ableton/discovery/NetworkByteStreamSerializable.hpp>
 #include <functional>
-#include <sstream>
 #include <unordered_map>
 
 namespace ableton
@@ -95,23 +94,36 @@ struct PayloadEntry
 namespace detail
 {
 
+// A handler returns false to reject its entry, which rejects the payload;
+// upstream signals the same condition by throwing out of the handler.
 template <typename It>
 using HandlerMap =
-  std::unordered_map<typename PayloadEntryHeader::Key, std::function<void(It, It)>>;
+  std::unordered_map<typename PayloadEntryHeader::Key, std::function<bool(It, It)>>;
 
 // Given an index of handlers and a byte range, parse the bytes as a
 // sequence of payload entries and invoke the appropriate handler for
 // each entry type. Entries that are encountered that do not have a
-// corresponding handler in the map are ignored. Throws
-// std::runtime_error if parsing fails for any entry. Note that if an
-// exception is thrown, some of the handlers may have already been called.
+// corresponding handler in the map are ignored. Returns false if the
+// bytes are malformed, where upstream throws std::runtime_error. Note
+// that some of the handlers may already have been called.
 template <typename It>
-void parseByteStream(HandlerMap<It>& map, It bsBegin, const It bsEnd)
+bool parseByteStream(HandlerMap<It>& map, It bsBegin, const It bsEnd)
 {
   using namespace std;
+  using ItDiff = typename iterator_traits<It>::difference_type;
+
+  // An entry header is a key and a size, each a uint32 on the wire.
+  const auto headerSize = static_cast<ItDiff>(sizeof(PayloadEntryHeader::Key)
+                                              + sizeof(PayloadEntryHeader::Size));
 
   while (bsBegin < bsEnd)
   {
+    // A truncated entry header ends the payload here.
+    if (distance(bsBegin, bsEnd) < headerSize)
+    {
+      return false;
+    }
+
     // Try to parse an entry header at this location in the byte stream
     PayloadEntryHeader header;
     It valueBegin;
@@ -119,12 +131,13 @@ void parseByteStream(HandlerMap<It>& map, It bsBegin, const It bsEnd)
       Deserialize<PayloadEntryHeader>::fromNetworkByteStream(bsBegin, bsEnd);
 
     // Ensure that the reported size of the entry does not exceed the
-    // length of the byte stream
-    It valueEnd = valueBegin + header.size;
-    if (bsEnd < valueEnd)
+    // length of the byte stream. header.size comes off the wire, so it is
+    // compared against the bytes left before any iterator is formed from it.
+    if (header.size > static_cast<std::uint64_t>(distance(valueBegin, bsEnd)))
     {
-      //throw range_error("Payload with incorrect size.");
+      return false;
     }
+    It valueEnd = valueBegin + static_cast<ItDiff>(header.size);
 
     // The next entry will start at the end of this one
     bsBegin = valueEnd;
@@ -133,9 +146,13 @@ void parseByteStream(HandlerMap<It>& map, It bsBegin, const It bsEnd)
     auto handlerIt = map.find(header.key);
     if (handlerIt != end(map))
     {
-      handlerIt->second(std::move(valueBegin), std::move(valueEnd));
+      if (!handlerIt->second(std::move(valueBegin), std::move(valueEnd)))
+      {
+        return false;
+      }
     }
   }
+  return true;
 }
 
 } // namespace detail
@@ -244,11 +261,11 @@ template <typename First, typename... Rest>
 struct ParsePayload<First, Rest...>
 {
   template <typename It, typename... Handlers>
-  static void parse(It begin, It end, Handlers... handlers)
+  static bool parse(It begin, It end, Handlers... handlers)
   {
     detail::HandlerMap<It> map;
     collectHandlers(map, std::move(handlers)...);
-    detail::parseByteStream(map, std::move(begin), std::move(end));
+    return detail::parseByteStream(map, std::move(begin), std::move(end));
   }
 
   template <typename It, typename FirstHandler, typename... RestHandlers>
@@ -259,17 +276,19 @@ struct ParsePayload<First, Rest...>
     using namespace std;
     map[First::key] = [handler](const It begin, const It end)
     {
+      // An entry is never encoded with an empty value.
+      if (begin == end)
+      {
+        return false;
+      }
       const auto res = First::fromNetworkByteStream(begin, end);
+      // The entry did not consume exactly the bytes its header declared.
       if (res.second != end)
       {
-        std::ostringstream stringStream;
-        stringStream << "Parsing payload entry " << First::key
-                     << " did not consume the expected number of bytes. "
-                     << " Expected: " << distance(begin, end)
-                     << ", Actual: " << distance(begin, res.second);
-        //throw range_error(stringStream.str());
+        return false;
       }
       handler(res.first);
+      return true;
     };
 
     ParsePayload<Rest...>::collectHandlers(map, std::move(rest)...);
@@ -285,11 +304,14 @@ struct ParsePayload<>
   }
 };
 
+// False means the bytes were malformed and the message must be dropped:
+// upstream reaches the same place by letting a range_error escape to the
+// caller, which this fork cannot do.
 template <typename... Entries, typename It, typename... Handlers>
-void parsePayload(It begin, It end, Handlers... handlers)
+bool parsePayload(It begin, It end, Handlers... handlers)
 {
   using namespace std;
-  ParsePayload<Entries...>::parse(
+  return ParsePayload<Entries...>::parse(
     std::move(begin), std::move(end), std::move(handlers)...);
 }
 
