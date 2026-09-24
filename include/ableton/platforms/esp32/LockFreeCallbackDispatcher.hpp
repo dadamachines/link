@@ -19,8 +19,10 @@
 
 #pragma once
 
+#include <algorithm>
 #include <atomic>
-#include <condition_variable>
+#include <chrono>
+#include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
 namespace ableton
@@ -33,10 +35,10 @@ namespace esp32
 // Utility to signal invocation of a callback on another thread in a lock free manner.
 // The callback is evoked on a thread owned by the instance of this class.
 //
-// A condition variable is used to notify a waiting thread, but only if the required
-// lock can be acquired immediately. If that fails, we fall back on signaling
-// after a timeout. This gives us a guaranteed minimum signaling rate which is defined
-// by the fallbackPeriod parameter.
+// invoke() is a FreeRTOS task notification: it never blocks and never takes a lock
+// the dispatching task can hold, so a real-time caller cannot wait on it. The task
+// also runs the callback after fallbackPeriod without a notification, which gives
+// the guaranteed minimum signaling rate.
 
 template <typename Callback, typename Duration>
 class LockFreeCallbackDispatcher
@@ -44,7 +46,10 @@ class LockFreeCallbackDispatcher
 public:
   LockFreeCallbackDispatcher(Callback callback, Duration fallbackPeriod)
     : mCallback(std::move(callback))
-    , mFallbackPeriod(std::move(fallbackPeriod))
+    , mFallbackTicks(std::max<TickType_t>(
+        1,
+        pdMS_TO_TICKS(
+          std::chrono::duration_cast<std::chrono::milliseconds>(fallbackPeriod).count())))
     , mRunning(true)
   {
     xTaskCreatePinnedToCore(run, "link", 4096, this, tskIDLE_PRIORITY, &mTaskHandle, LINK_ESP_TASK_CORE_ID);
@@ -53,16 +58,15 @@ public:
   ~LockFreeCallbackDispatcher()
   {
     mRunning = false;
-    mCondition.notify_one();
+    invoke();
     vTaskDelete(mTaskHandle);
   }
 
   void invoke()
   {
-    if (mMutex.try_lock())
+    if (mTaskHandle != nullptr)
     {
-      mCondition.notify_one();
-      mMutex.unlock();
+      xTaskNotifyGive(mTaskHandle);
     }
   }
 
@@ -72,21 +76,16 @@ private:
     auto dispatcher = static_cast<LockFreeCallbackDispatcher*>(userData);
     while (dispatcher->mRunning.load())
     {
-      {
-        std::unique_lock<std::mutex> lock(dispatcher->mMutex);
-        dispatcher->mCondition.wait_for(lock, dispatcher->mFallbackPeriod);
-      }
+      ulTaskNotifyTake(pdTRUE, dispatcher->mFallbackTicks);
       dispatcher->mCallback();
       vTaskDelay(1);
     }
   }
 
   Callback mCallback;
-  Duration mFallbackPeriod;
+  TickType_t mFallbackTicks;
   std::atomic<bool> mRunning;
-  std::mutex mMutex;
-  std::condition_variable mCondition;
-  TaskHandle_t mTaskHandle;
+  TaskHandle_t mTaskHandle = nullptr;
 };
 
 } // namespace esp32
