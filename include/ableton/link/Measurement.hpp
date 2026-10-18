@@ -42,6 +42,11 @@ struct Measurement
 
   static const std::size_t kNumberDataPoints = 100;
   static const std::size_t kNumberMeasurements = 5;
+  // tbd: the next ping goes this long after a pong, not at once. Back to back, a measurement was some fifty round
+  // trips of Link code from flash within ~100 ms on the unit's network core, which starved its audio core of the
+  // shared memory bus. A paced ping cannot carry PrevGHostTime (the pong-to-ping midpoint would be biased by the
+  // gap), so each round trip gives the one exact point: kNumberDataPoints round trips, about half a second.
+  static constexpr std::chrono::milliseconds kPingSpacing{5};
 
   Measurement(const PeerState& state,
               Callback callback,
@@ -77,6 +82,7 @@ struct Measurement
       , mCallback(std::move(callback))
       , mClock(std::move(clock))
       , mTimer(io->makeTimer())
+      , mPaceTimer(io->makeTimer())
       , mMeasurementsStarted(0)
       , mLog(channel(io->log(), "Measurement on gateway@" + address.to_string()))
       , mSuccess(false)
@@ -123,6 +129,23 @@ struct Measurement
 
     void listen() { mSocket.receive(util::makeAsyncSafe(this->shared_from_this())); }
 
+    // The next ping, kPingSpacing after a pong, stamped when it leaves; the reply timeout runs from then.
+    void schedulePing(const discovery::UdpEndpoint to)
+    {
+      mTimer.cancel();
+      mPaceTimer.cancel();
+      mPaceTimer.expires_from_now(kPingSpacing);
+      mPaceTimer.async_wait(
+        [this, to](const typename Timer::ErrorCode e)
+        {
+          if (!e)
+          {
+            sendPing(to, discovery::makePayload(HostTime{mClock.micros()}));
+            resetTimer();
+          }
+        });
+    }
+
     // Operator to handle incoming messages on the interface
     template <typename It>
     void operator()(const discovery::UdpEndpoint& from,
@@ -164,11 +187,6 @@ struct Measurement
         if (mSessionId == sessionId)
         {
           const auto hostTime = mClock.micros();
-
-          const auto payload =
-            discovery::makePayload(HostTime{hostTime}, PrevGHostTime{ghostTime});
-
-          sendPing(from, payload);
           listen();
 
 
@@ -192,7 +210,7 @@ struct Measurement
           }
           else
           {
-            resetTimer();
+            schedulePing(from);
           }
         }
         else
@@ -221,6 +239,7 @@ struct Measurement
     void finish()
     {
       mTimer.cancel();
+      mPaceTimer.cancel();
       mSuccess = true;
       debug(mLog) << "Measuring " << mEndpoint << " done.";
       mCallback(mData);
@@ -240,6 +259,7 @@ struct Measurement
     Callback mCallback;
     Clock mClock;
     Timer mTimer;
+    Timer mPaceTimer;
     std::size_t mMeasurementsStarted;
     Log mLog;
     bool mSuccess;
