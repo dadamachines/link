@@ -43,11 +43,16 @@ struct TestNodeState
   }
 
   template <typename It>
-  static TestNodeState fromPayload(const uint8_t id, It begin, It end)
+  static TestNodeState fromPayload(
+    const uint8_t id, It begin, It end, bool* pWellFormed = nullptr)
   {
     TestNodeState state = {id, 0};
-    parsePayload<test::Foo>(
+    const auto wellFormed = parsePayload<test::Foo>(
       begin, end, [&state](const test::Foo& foo) { state.fooVal = foo.fooVal; });
+    if (pWellFormed != nullptr)
+    {
+      *pWellFormed = wellFormed;
+    }
     return state;
   }
 

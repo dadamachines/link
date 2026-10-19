@@ -46,7 +46,8 @@ struct Measurement
   // trips of Link code from flash within ~100 ms on the unit's network core, which starved its audio core of the
   // shared memory bus. A paced ping cannot carry PrevGHostTime (the pong-to-ping midpoint would be biased by the
   // gap), so each round trip gives the one exact point: kNumberDataPoints round trips, about half a second.
-  static constexpr std::chrono::milliseconds kPingSpacing{5};
+  // A function, not a static data member: it needs no out-of-class definition before C++17.
+  static std::chrono::milliseconds pingSpacing() { return std::chrono::milliseconds{5}; }
 
   Measurement(const PeerState& state,
               Callback callback,
@@ -129,12 +130,12 @@ struct Measurement
 
     void listen() { mSocket.receive(util::makeAsyncSafe(this->shared_from_this())); }
 
-    // The next ping, kPingSpacing after a pong, stamped when it leaves; the reply timeout runs from then.
+    // The next ping, pingSpacing() after a pong, stamped when it leaves; the reply timeout runs from then.
     void schedulePing(const discovery::UdpEndpoint to)
     {
       mTimer.cancel();
       mPaceTimer.cancel();
-      mPaceTimer.expires_from_now(kPingSpacing);
+      mPaceTimer.expires_from_now(pingSpacing());
       mPaceTimer.async_wait(
         [this, to](const typename Timer::ErrorCode e)
         {
