@@ -26,7 +26,11 @@
 #include <ableton/util/Injected.hpp>
 #include <ableton/util/SafeAsyncHandler.hpp>
 #include <algorithm>
+#include <chrono>
 #include <memory>
+#include <type_traits>
+#include <utility>
+#include <vector>
 
 namespace ableton
 {
@@ -145,6 +149,8 @@ private:
       , mInterface(std::move(iface))
       , mState(std::move(state))
       , mTimer(mIo->makeTimer())
+      , mCoalesceTimer(mIo->makeTimer())
+      , mCoalesceArmed(false)
       , mLastBroadcastTime{}
       , mTtl(ttl)
       , mTtlRatio(ttlRatio)
@@ -191,7 +197,10 @@ private:
     {
       using namespace std::chrono;
 
-      const auto minBroadcastPeriod = milliseconds{50};
+      // tbd: 100 ms (upstream 50 ms). During a tempo drag on a peer every adopted change
+      // rebroadcasts our state; each send is network code from flash on a core that shares
+      // its cache with the audio render.
+      const auto minBroadcastPeriod = milliseconds{100};
       const auto nominalBroadcastPeriod = milliseconds(mTtl * 1000 / mTtlRatio);
       const auto timeSinceLastBroadcast =
         duration_cast<milliseconds>(mTimer.now() - mLastBroadcastTime);
@@ -284,13 +293,19 @@ private:
           switch (header.messageType)
           {
           case v1::kAlive:
-            sendResponse(from);
+            // tbd: a response tells a newcomer about us before our next alive; once a
+            // second per peer is enough, not one per alive (a tempo drag sends up to 20).
+            if (shouldRespond(header.ident))
+            {
+              sendResponse(from);
+            }
             receivePeerState(std::move(result.first), result.second, messageEnd);
             break;
           case v1::kResponse:
             receivePeerState(std::move(result.first), result.second, messageEnd);
             break;
           case v1::kByeBye:
+            forgetPeer(result.first.ident);
             receiveByeBye(std::move(result.first.ident));
             break;
           default:
@@ -320,11 +335,158 @@ private:
         return;
       }
 
+      offerPeerState(PeerState<NodeState>{std::move(state), header.ttl});
+    }
+
+    // tbd: coalescing. A peer's state reaches the gateway at most once per
+    // coalescePeriod(); a state arriving sooner is held, and the newest held one is
+    // delivered when the period ends. Link's peer state is a whole state (the last one
+    // wins), so nothing is lost, only merged; a bye-bye drops what is held for that peer.
+    static std::chrono::milliseconds coalescePeriod() { return std::chrono::milliseconds{100}; }
+    static std::chrono::milliseconds responseInterval() { return std::chrono::milliseconds{1000}; }
+
+    using PeerId =
+      typename std::decay<decltype(std::declval<const NodeState&>().ident())>::type;
+
+    struct PeerEntry
+    {
+      PeerId id;
+      TimePoint lastDelivered;
+      TimePoint lastResponded;
+      bool delivered;
+      bool responded;
+      bool pending;
+      PeerState<NodeState> pendingState;
+    };
+
+    PeerEntry& peerEntry(const PeerId& id, const TimePoint now)
+    {
+      for (auto& entry : mPeers)
+      {
+        if (entry.id == id)
+        {
+          return entry;
+        }
+      }
+      // Forget peers we have not heard from in a minute, so the list stays small.
+      mPeers.erase(std::remove_if(mPeers.begin(),
+                                  mPeers.end(),
+                                  [now](const PeerEntry& e)
+                                  {
+                                    return !e.pending
+                                           && now - e.lastDelivered > std::chrono::seconds(60)
+                                           && now - e.lastResponded > std::chrono::seconds(60);
+                                  }),
+                   mPeers.end());
+      mPeers.push_back(PeerEntry{id, now, now, false, false, false, {}});
+      return mPeers.back();
+    }
+
+    bool shouldRespond(const PeerId& id)
+    {
+      const auto now = mTimer.now();
+      auto& entry = peerEntry(id, now);
+      if (entry.responded && now - entry.lastResponded < responseInterval())
+      {
+        return false;
+      }
+      entry.responded = true;
+      entry.lastResponded = now;
+      return true;
+    }
+
+    void forgetPeer(const PeerId& id)
+    {
+      mPeers.erase(std::remove_if(mPeers.begin(),
+                                  mPeers.end(),
+                                  [&id](const PeerEntry& e) { return e.id == id; }),
+                   mPeers.end());
+    }
+
+    void deliverPeerState(PeerState<NodeState> peerState)
+    {
       // Handlers must only be called once
       auto handler = std::move(mPeerStateHandler);
       mPeerStateHandler = [](PeerState<NodeState>) {};
-      handler(PeerState<NodeState>{std::move(state), header.ttl});
+      handler(std::move(peerState));
+    }
 
+    void offerPeerState(PeerState<NodeState> peerState)
+    {
+      const auto now = mTimer.now();
+      auto& entry = peerEntry(peerState.peerState.ident(), now);
+      if (!entry.pending && (!entry.delivered || now - entry.lastDelivered >= coalescePeriod()))
+      {
+        entry.delivered = true;
+        entry.lastDelivered = now;
+        deliverPeerState(std::move(peerState));
+        return;
+      }
+      entry.pendingState = std::move(peerState);
+      entry.pending = true;
+      scheduleCoalesced(now);
+    }
+
+    void scheduleCoalesced(const TimePoint now)
+    {
+      if (mCoalesceArmed)
+      {
+        return;
+      }
+      auto wait = coalescePeriod();
+      for (const auto& entry : mPeers)
+      {
+        if (entry.pending)
+        {
+          const auto due = std::chrono::duration_cast<std::chrono::milliseconds>(
+            entry.lastDelivered + coalescePeriod() - now);
+          if (due < wait)
+          {
+            wait = due;
+          }
+        }
+      }
+      if (wait < std::chrono::milliseconds{1})
+      {
+        wait = std::chrono::milliseconds{1};
+      }
+      mCoalesceArmed = true;
+      mCoalesceTimer.expires_from_now(wait);
+      mCoalesceTimer.async_wait(
+        [this](const TimerError e)
+        {
+          mCoalesceArmed = false;
+          if (!e)
+          {
+            deliverDue();
+          }
+        });
+    }
+
+    void deliverDue()
+    {
+      const auto now = mTimer.now();
+      // Deliver from a copy of the due states: a delivery may not touch mPeers, but the
+      // list must not be walked while a handler runs.
+      std::vector<PeerState<NodeState>> due;
+      for (auto& entry : mPeers)
+      {
+        if (entry.pending && now - entry.lastDelivered >= coalescePeriod())
+        {
+          entry.pending = false;
+          entry.delivered = true;
+          entry.lastDelivered = now;
+          due.push_back(std::move(entry.pendingState));
+        }
+      }
+      for (auto& peerState : due)
+      {
+        deliverPeerState(std::move(peerState));
+      }
+      if (std::any_of(mPeers.begin(), mPeers.end(), [](const PeerEntry& e) { return e.pending; }))
+      {
+        scheduleCoalesced(now);
+      }
     }
 
     void receiveByeBye(NodeId nodeId)
@@ -339,6 +501,9 @@ private:
     util::Injected<Interface> mInterface;
     NodeState mState;
     Timer mTimer;
+    Timer mCoalesceTimer;
+    bool mCoalesceArmed;
+    std::vector<PeerEntry> mPeers;
     TimePoint mLastBroadcastTime;
     uint8_t mTtl;
     uint8_t mTtlRatio;
