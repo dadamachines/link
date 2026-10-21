@@ -107,14 +107,7 @@ private:
       {
         debug(mLog) << " Received ping message from " << from;
 
-        try
-        {
-          reply(std::move(payloadBegin), std::move(end), from);
-        }
-        catch (const std::runtime_error& err)
-        {
-          info(mLog) << " Failed to send pong to " << from << ". Reason: " << err.what();
-        }
+        reply(std::move(payloadBegin), std::move(end), from);
       }
       else
       {

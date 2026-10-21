@@ -43,11 +43,16 @@ struct TestNodeState
   }
 
   template <typename It>
-  static TestNodeState fromPayload(const uint8_t id, It begin, It end)
+  static TestNodeState fromPayload(
+    const uint8_t id, It begin, It end, bool* pWellFormed = nullptr)
   {
     TestNodeState state = {id, 0};
-    parsePayload<test::Foo>(
+    const auto wellFormed = parsePayload<test::Foo>(
       begin, end, [&state](const test::Foo& foo) { state.fooVal = foo.fooVal; });
+    if (pWellFormed != nullptr)
+    {
+      *pWellFormed = wellFormed;
+    }
     return state;
   }
 
@@ -216,6 +221,118 @@ TEST_CASE("UdpMessenger")
     }
     // We should have an initial Alive and then a single ByeBye
     CHECK(2 == iface.sentMessages.size());
+  }
+
+  // tbd: a peer's state reaches the gateway at most once per 100 ms; the newest of what
+  // arrives in between is delivered when the window ends.
+  SECTION("CoalescesRapidPeerStates")
+  {
+    auto messenger = makeUdpMessenger(
+      util::injectRef(iface), TestNodeState{}, util::injectVal(io.makeIoContext()), 1, 1);
+    auto handler = TestHandler{};
+    v1::MessageBuffer buffer;
+    for (int32_t val : {20, 21, 22})
+    {
+      messenger.receive(std::ref(handler));
+      const auto end = v1::aliveMessage(
+        state1.nodeId, 3, toPayload(TestNodeState{state1.nodeId, val}), begin(buffer));
+      iface.incomingMessage(peerEndpoint, begin(buffer), end);
+    }
+    REQUIRE(1 == handler.peerStates.size());
+    CHECK(20 == handler.peerStates[0].peerState.fooVal);
+
+    messenger.receive(std::ref(handler));
+    io.advanceTime(std::chrono::milliseconds(150));
+    REQUIRE(2 == handler.peerStates.size());
+    CHECK(22 == handler.peerStates[1].peerState.fooVal);
+    CHECK(3 == handler.peerStates[1].ttl);
+
+    // Once the window has passed, the next state goes through at once.
+    io.advanceTime(std::chrono::milliseconds(150));
+    messenger.receive(std::ref(handler));
+    const auto end = v1::aliveMessage(
+      state1.nodeId, 3, toPayload(TestNodeState{state1.nodeId, 23}), begin(buffer));
+    iface.incomingMessage(peerEndpoint, begin(buffer), end);
+    REQUIRE(3 == handler.peerStates.size());
+    CHECK(23 == handler.peerStates[2].peerState.fooVal);
+  }
+
+  SECTION("PeersDoNotHoldEachOther")
+  {
+    auto messenger = makeUdpMessenger(
+      util::injectRef(iface), TestNodeState{}, util::injectVal(io.makeIoContext()), 1, 1);
+    auto handler = TestHandler{};
+    v1::MessageBuffer buffer;
+    for (uint8_t id : {uint8_t{5}, uint8_t{7}})
+    {
+      messenger.receive(std::ref(handler));
+      const auto end =
+        v1::aliveMessage(id, 3, toPayload(TestNodeState{id, 1}), begin(buffer));
+      iface.incomingMessage(peerEndpoint, begin(buffer), end);
+    }
+    CHECK(2 == handler.peerStates.size());
+  }
+
+  SECTION("ByeByeDropsHeldState")
+  {
+    auto messenger = makeUdpMessenger(
+      util::injectRef(iface), TestNodeState{}, util::injectVal(io.makeIoContext()), 1, 1);
+    auto handler = TestHandler{};
+    v1::MessageBuffer buffer;
+    for (int32_t val : {20, 21})
+    {
+      messenger.receive(std::ref(handler));
+      const auto end = v1::aliveMessage(
+        state1.nodeId, 3, toPayload(TestNodeState{state1.nodeId, val}), begin(buffer));
+      iface.incomingMessage(peerEndpoint, begin(buffer), end);
+    }
+    messenger.receive(std::ref(handler));
+    const auto byeEnd = v1::byeByeMessage(state1.nodeId, begin(buffer));
+    iface.incomingMessage(peerEndpoint, begin(buffer), byeEnd);
+    REQUIRE(1 == handler.byeByes.size());
+
+    messenger.receive(std::ref(handler));
+    io.advanceTime(std::chrono::milliseconds(150));
+    REQUIRE(1 == handler.peerStates.size());
+    CHECK(20 == handler.peerStates[0].peerState.fooVal);
+  }
+
+  // tbd: an alive is answered once a second per peer; a newcomer is answered at once.
+  SECTION("RespondsOncePerSecondPerPeer")
+  {
+    auto messenger = makeUdpMessenger(
+      util::injectRef(iface), state2, util::injectVal(io.makeIoContext()), 10, 10);
+    const auto responsesTo = [&](const UdpEndpoint& to)
+    {
+      size_t n = 0;
+      for (const auto& sent : iface.sentMessages)
+      {
+        const auto header = v1::parseMessageHeader<TestNodeState::IdType>(
+          begin(sent.first), end(sent.first)).first;
+        if (header.messageType == v1::kResponse && sent.second == to)
+        {
+          ++n;
+        }
+      }
+      return n;
+    };
+    const auto otherEndpoint = UdpEndpoint{makeAddress("123.123.234.235"), 1900};
+    v1::MessageBuffer buffer;
+    for (int i = 0; i < 3; ++i)
+    {
+      const auto end = v1::aliveMessage(state1.nodeId, 10, makePayload(), begin(buffer));
+      iface.incomingMessage(peerEndpoint, begin(buffer), end);
+    }
+    CHECK(1 == responsesTo(peerEndpoint));
+
+    const auto otherEnd = v1::aliveMessage(7, 10, makePayload(), begin(buffer));
+    iface.incomingMessage(otherEndpoint, begin(buffer), otherEnd);
+    CHECK(1 == responsesTo(otherEndpoint));
+
+    io.advanceTime(std::chrono::milliseconds(1100));
+    const auto end = v1::aliveMessage(state1.nodeId, 10, makePayload(), begin(buffer));
+    iface.incomingMessage(peerEndpoint, begin(buffer), end);
+    CHECK(2 == responsesTo(peerEndpoint));
   }
 
   SECTION("DropMessageFromUnreachableNetwork")

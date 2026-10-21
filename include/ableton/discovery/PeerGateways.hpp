@@ -145,16 +145,8 @@ private:
       // Add the new addresses
       for (const auto& addr : newAddrs)
       {
-        try
-        {
           info(mIo.log()) << "initializing peer gateway on interface " << addr;
           mGateways.emplace(addr, mFactory(mState, util::injectRef(mIo), addr));
-        }
-        catch (const runtime_error& e)
-        {
-          warning(mIo.log()) << "failed to init gateway on interface " << addr
-                             << " reason: " << e.what();
-        }
       }
     }
 

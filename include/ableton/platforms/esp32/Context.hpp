@@ -48,13 +48,7 @@ class Context
       auto runner = static_cast<ServiceRunner*>(userParams);
       for (;;)
       {
-        try
-        {
           runner->mpService->run();
-        }
-        catch (...)
-        {
-        }
       }
     }
 
@@ -141,10 +135,6 @@ public:
       socket.mpImpl->mSocket.bind(
         ::LINK_ASIO_NAMESPACE::ip::udp::endpoint{addr.to_v6(), 0});
     }
-    else
-    {
-      throw(std::runtime_error("Unknown Protocol"));
-    }
     return socket;
   }
 
@@ -180,10 +170,6 @@ public:
         {::asio::ip::address_v6::any(), multicastEndpoint.port()});
       socket.mpImpl->mSocket.set_option(
         ::asio::ip::multicast::join_group(multicastEndpoint.address().to_v6(), scopeId));
-    }
-    else
-    {
-      throw(std::runtime_error("Unknown Protocol"));
     }
     return socket;
   }

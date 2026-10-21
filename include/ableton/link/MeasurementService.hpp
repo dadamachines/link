@@ -77,18 +77,10 @@ public:
     auto addr = mPingResponder.endpoint().address();
     auto callback = CompletionCallback<Handler>{*this, nodeId, handler};
 
-    try
-    {
-      mMeasurementMap[nodeId] =
-        std::unique_ptr<MeasurementInstance>(new MeasurementInstance{
-          state, std::move(callback), std::move(addr), mClock, mIo});
-    }
-    catch (const runtime_error& err)
-    {
-      info(mIo->log()) << "gateway@" + addr.to_string()
-                       << " Failed to measure. Reason: " << err.what();
-      handler(GhostXForm{});
-    }
+    mMeasurementMap[nodeId] =
+    std::unique_ptr<MeasurementInstance>(new MeasurementInstance{
+      state, std::move(callback), std::move(addr), mClock, mIo});
+
   }
 
 private:

@@ -112,7 +112,9 @@ std::pair<T, It> copyFromByteStream(It begin, const It end)
 
   if (distance(begin, end) < static_cast<ItDiff>(sizeof(T)))
   {
-    throw range_error("Parsing type from byte stream failed");
+    // Exceptions are off in this fork, so a short stream is reported by
+    // returning the iterator unadvanced; upstream throws range_error here.
+    return make_pair(T{}, begin);
   }
   else
   {
@@ -328,7 +330,16 @@ BytesIt deserializeContainer(BytesIt bytesBegin,
   while (bytesBegin < bytesEnd && numElements < maxElements)
   {
     T newVal;
-    tie(newVal, bytesBegin) = Deserialize<T>::fromNetworkByteStream(bytesBegin, bytesEnd);
+    BytesIt next;
+    tie(newVal, next) = Deserialize<T>::fromNetworkByteStream(bytesBegin, bytesEnd);
+    // maxElements is a wire-supplied count: stop on the first element the
+    // remaining bytes cannot hold, instead of spinning on an unadvanced
+    // iterator and growing the container without bound.
+    if (next == bytesBegin)
+    {
+      break;
+    }
+    bytesBegin = next;
     *contBegin++ = newVal;
     ++numElements;
   }

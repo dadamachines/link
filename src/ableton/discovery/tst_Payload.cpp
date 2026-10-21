@@ -157,13 +157,14 @@ TEST_CASE("Payload")
     test::Foo actualFoo{};
     test::Bar actualBar{};
 
-    REQUIRE_THROWS_AS(( // We truncate the buffer by one byte
-                        parsePayload<test::Foo, test::Bar>(
-                          begin(bytes),
-                          end - 1,
-                          [&actualFoo](const test::Foo& foo) { actualFoo = foo; },
-                          [&actualBar](const test::Bar& bar) { actualBar = bar; })),
-                      std::runtime_error);
+    // tbd: no exceptions -- a truncated payload is reported by the return value.
+    // We truncate the buffer by one byte
+    const auto wellFormed = parsePayload<test::Foo, test::Bar>(
+      begin(bytes),
+      end - 1,
+      [&actualFoo](const test::Foo& foo) { actualFoo = foo; },
+      [&actualBar](const test::Bar& bar) { actualBar = bar; });
+    CHECK(!wellFormed);
 
     // We expect that bar should be properly parsed but foo not
     CHECK(0 == actualFoo.fooVal);

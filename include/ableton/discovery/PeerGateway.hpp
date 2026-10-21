@@ -78,14 +78,7 @@ private:
     void updateState(NodeState state)
     {
       mMessenger->updateState(std::move(state));
-      try
-      {
-        mMessenger->broadcastState();
-      }
-      catch (const std::runtime_error& err)
-      {
-        info(mIo->log()) << "State broadcast failed on gateway: " << err.what();
-      }
+      mMessenger->broadcastState();
     }
 
     void listen() { mMessenger->receive(util::makeAsyncSafe(this->shared_from_this())); }
@@ -237,8 +230,11 @@ Gateway<PeerObserver, NodeState, IoContext> makeGateway(
   using namespace std;
   using namespace util;
 
-  const uint8_t ttl = 5;
-  const uint8_t ttlRatio = 20;
+  // tbd: an alive every second (ttl 10 / ratio 10; upstream 5 / 20, every 250 ms). Each peer
+  // announces its own ttl, so the timeout others keep for us scales with it. The alive is not
+  // the timing path (the measurement is); this only spends less network work at rest.
+  const uint8_t ttl = 10;
+  const uint8_t ttlRatio = 10;
 
   auto iface = makeIpInterface<v1::kMaxMessageSize>(injectRef(*io), addr);
 

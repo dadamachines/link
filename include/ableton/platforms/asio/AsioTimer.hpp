@@ -87,13 +87,7 @@ public:
 
   void cancel()
   {
-    try
-    {
       mpTimer->cancel();
-    }
-    catch (...)
-    {
-    }
   }
 
   template <typename Handler>

@@ -135,6 +135,9 @@ TEST_CASE("PeerMeasurement")
 
     fixture.socket().incomingMessage(endpoint, msgBegin, msgEnd);
 
+    // tbd: the next ping waits pingSpacing() after the pong
+    CHECK(1 == fixture.socket().sentMessages.size());
+    fixture.mMeasurement.mpImpl->mPaceTimer.advance(std::chrono::milliseconds(6));
     CHECK(2 == fixture.socket().sentMessages.size());
     CHECK(0 == fixture.mMeasurement.mpImpl->mData.size());
   }
@@ -153,8 +156,29 @@ TEST_CASE("PeerMeasurement")
 
     fixture.socket().incomingMessage(endpoint, msgBegin, msgEnd);
 
-    CHECK(2 == fixture.socket().sentMessages.size());
+    // The pong's two points are taken at once; the next ping waits pingSpacing().
     CHECK(2 == fixture.mMeasurement.mpImpl->mData.size());
+    CHECK(1 == fixture.socket().sentMessages.size());
+    fixture.mMeasurement.mpImpl->mPaceTimer.advance(std::chrono::milliseconds(4));
+    CHECK(1 == fixture.socket().sentMessages.size());
+    fixture.mMeasurement.mpImpl->mPaceTimer.advance(std::chrono::milliseconds(2));
+    REQUIRE(2 == fixture.socket().sentMessages.size());
+
+    // A paced ping carries the time it leaves and no PrevGHostTime: the pong-to-ping
+    // midpoint would be biased by the gap.
+    const auto pingBuffer = fixture.socket().sentMessages[1].first;
+    const auto pingResult =
+      v1::parseMessageHeader(std::begin(pingBuffer), std::end(pingBuffer));
+    std::chrono::microseconds pingHt{0};
+    std::chrono::microseconds pingPgt{0};
+    discovery::parsePayload<HostTime, PrevGHostTime>(
+      pingResult.second,
+      std::end(pingBuffer),
+      [&pingHt](HostTime hostTime) { pingHt = std::move(hostTime.time); },
+      [&pingPgt](PrevGHostTime prev) { pingPgt = std::move(prev.time); });
+    CHECK(v1::kPing == pingResult.first.messageType);
+    CHECK(std::chrono::microseconds{4} == pingHt);
+    CHECK(std::chrono::microseconds{0} == pingPgt);
   }
 }
 

@@ -64,17 +64,25 @@ struct PeerState
   }
 
   template <typename It>
-  static PeerState fromPayload(NodeId id, It begin, It end)
+  static PeerState fromPayload(
+    NodeId id, It begin, It end, bool* pWellFormed = nullptr)
   {
     using namespace std;
-    auto peerState = PeerState{NodeState::fromPayload(std::move(id), begin, end), {}};
+    auto peerState =
+      PeerState{NodeState::fromPayload(std::move(id), begin, end, pWellFormed), {}};
 
-    discovery::parsePayload<MeasurementEndpointV4, MeasurementEndpointV6>(
-      std::move(begin),
-      std::move(end),
-      [&peerState](MeasurementEndpointV4 me4) { peerState.endpoint = std::move(me4.ep); },
-      [&peerState](MeasurementEndpointV6 me6)
-      { peerState.endpoint = std::move(me6.ep); });
+    const auto wellFormed =
+      discovery::parsePayload<MeasurementEndpointV4, MeasurementEndpointV6>(
+        std::move(begin),
+        std::move(end),
+        [&peerState](MeasurementEndpointV4 me4)
+        { peerState.endpoint = std::move(me4.ep); },
+        [&peerState](MeasurementEndpointV6 me6)
+        { peerState.endpoint = std::move(me6.ep); });
+    if (pWellFormed != nullptr && !wellFormed)
+    {
+      *pWellFormed = false;
+    }
     return peerState;
   }
 
